@@ -241,6 +241,44 @@ def get_metric_values(df, standard_name, default_val=0.0):
     else:
         return pd.Series(default_val, index=df.columns)
 
+def safe_get_year_value(series, year):
+    """
+    Safely retrieves value for a year from a series to prevent KeyError.
+    Checks exact match, string/int types, then falls back to iloc[-1].
+    """
+    if series is None or len(series) == 0:
+        return 0.0
+    
+    # Try exact match
+    if year in series.index:
+        val = series.loc[year]
+        if isinstance(val, pd.Series):
+            val = val.iloc[0]
+        return float(val)
+        
+    # Try string representation
+    year_str = str(year).strip()
+    if year_str in series.index:
+        val = series.loc[year_str]
+        if isinstance(val, pd.Series):
+            val = val.iloc[0]
+        return float(val)
+        
+    # Try integer representation
+    try:
+        year_int = int(float(year))
+        if year_int in series.index:
+            val = series.loc[year_int]
+            if isinstance(val, pd.Series):
+                val = val.iloc[0]
+            return float(val)
+    except (ValueError, TypeError):
+        pass
+        
+    # Fallback to the last available element
+    val = series.iloc[-1]
+    return float(val)
+
 # ----------------- MULTI-SHEET DATA PROCESSING ENGINE -----------------
 
 def parse_single_sheet(df_raw):
@@ -456,14 +494,14 @@ def create_waterfall_chart(df_income, period):
     """
     Creates a P&L Waterfall chart from Revenue to Net Income for a given year.
     """
-    rev = get_metric_values(df_income, "Revenue").loc[period]
-    cogs = get_metric_values(df_income, "COGS").loc[period]
-    gross = get_metric_values(df_income, "Gross Profit").loc[period]
-    opex = get_metric_values(df_income, "Operating Expenses").loc[period]
-    ebit = get_metric_values(df_income, "EBIT").loc[period]
-    interest = get_metric_values(df_income, "Interest Expense").loc[period]
-    tax = get_metric_values(df_income, "Tax Expense").loc[period]
-    net = get_metric_values(df_income, "Net Income").loc[period]
+    rev = safe_get_year_value(get_metric_values(df_income, "Revenue"), period)
+    cogs = safe_get_year_value(get_metric_values(df_income, "COGS"), period)
+    gross = safe_get_year_value(get_metric_values(df_income, "Gross Profit"), period)
+    opex = safe_get_year_value(get_metric_values(df_income, "Operating Expenses"), period)
+    ebit = safe_get_year_value(get_metric_values(df_income, "EBIT"), period)
+    interest = safe_get_year_value(get_metric_values(df_income, "Interest Expense"), period)
+    tax = safe_get_year_value(get_metric_values(df_income, "Tax Expense"), period)
+    net = safe_get_year_value(get_metric_values(df_income, "Net Income"), period)
     
     x_labels = [
         "Revenue", "COGS", "Gross Profit", 
@@ -559,11 +597,11 @@ def create_expense_pie_chart(df, period):
     """
     Sum opex categories and plot breakdown.
     """
-    rd = get_metric_values(df, "R&D").loc[period]
-    sm = get_metric_values(df, "S&M").loc[period]
-    ga = get_metric_values(df, "G&A").loc[period]
+    rd = safe_get_year_value(get_metric_values(df, "R&D"), period)
+    sm = safe_get_year_value(get_metric_values(df, "S&M"), period)
+    ga = safe_get_year_value(get_metric_values(df, "G&A"), period)
     
-    total_opex = get_metric_values(df, "Operating Expenses").loc[period]
+    total_opex = safe_get_year_value(get_metric_values(df, "Operating Expenses"), period)
     captured = rd + sm + ga
     other = max(0.0, total_opex - captured)
     
@@ -941,14 +979,36 @@ def main():
     df_balance = statements.get("Balance Sheet")
     df_ratios = statements.get("Financial Ratios")
     
-    # Determine columns/years intersection across statements for global synchronization
+    # Global timeline (years) column synchronization:
+    # Build the chronological union of all years appearing in any of the statement dataframes.
+    all_cols = set()
+    for df in [df_income, df_balance, df_ratios]:
+        if df is not None and not df.empty:
+            all_cols.update(df.columns)
+            
     years = []
-    if not df_income.empty:
-        years = list(df_income.columns)
-    elif not df_balance.empty:
-        years = list(df_balance.columns)
-    elif not df_ratios.empty:
-        years = list(df_ratios.columns)
+    if all_cols:
+        def get_sort_val(col):
+            try:
+                return float(col)
+            except ValueError:
+                return col
+        try:
+            years = [str(y) for y in sorted(list(all_cols), key=get_sort_val)]
+        except Exception:
+            years = [str(y) for y in sorted(list(all_cols))]
+
+    # Align all dataframes to the identical years index
+    if years:
+        if df_income is not None and not df_income.empty:
+            df_income = df_income.reindex(columns=years, fill_value=0.0)
+            statements["Income Statement"] = df_income
+        if df_balance is not None and not df_balance.empty:
+            df_balance = df_balance.reindex(columns=years, fill_value=0.0)
+            statements["Balance Sheet"] = df_balance
+        if df_ratios is not None and not df_ratios.empty:
+            df_ratios = df_ratios.reindex(columns=years, fill_value=0.0)
+            statements["Financial Ratios"] = df_ratios
         
     # Main Tabs Interface
     tabs = st.tabs(["Overview Dashboard", "Income Statement", "Balance Sheet", "Financial Ratios"])
@@ -966,29 +1026,32 @@ def main():
             net_series = get_metric_values(df_income, "Net Income")
             cr_series = get_metric_values(df_ratios, "Current Ratio")
             
-            latest_rev = rev_series.loc[latest_year]
-            latest_net = net_series.loc[latest_year]
-            latest_cr = cr_series.loc[latest_year]
+            latest_rev = safe_get_year_value(rev_series, latest_year)
+            latest_net = safe_get_year_value(net_series, latest_year)
+            latest_cr = safe_get_year_value(cr_series, latest_year)
             
             # Deltas calculation
             rev_delta_str = "No historical baseline"
             rev_class = "neutral"
-            if prev_year and rev_series.loc[prev_year] != 0:
-                rev_pct = ((latest_rev - rev_series.loc[prev_year]) / abs(rev_series.loc[prev_year])) * 100.0
+            prev_rev = safe_get_year_value(rev_series, prev_year) if prev_year else 0
+            if prev_year and prev_rev != 0:
+                rev_pct = ((latest_rev - prev_rev) / abs(prev_rev)) * 100.0
                 rev_delta_str = f"{'+' if rev_pct >= 0 else ''}{rev_pct:.1f}% YoY"
                 rev_class = "up" if rev_pct >= 0 else "down"
                 
             net_delta_str = "No historical baseline"
             net_class = "neutral"
-            if prev_year and net_series.loc[prev_year] != 0:
-                net_pct = ((latest_net - net_series.loc[prev_year]) / abs(net_series.loc[prev_year])) * 100.0
+            prev_net = safe_get_year_value(net_series, prev_year) if prev_year else 0
+            if prev_year and prev_net != 0:
+                net_pct = ((latest_net - prev_net) / abs(prev_net)) * 100.0
                 net_delta_str = f"{'+' if net_pct >= 0 else ''}{net_pct:.1f}% YoY"
                 net_class = "up" if net_pct >= 0 else "down"
                 
             cr_delta_str = "No historical baseline"
             cr_class = "neutral"
             if prev_year:
-                cr_diff = latest_cr - cr_series.loc[prev_year]
+                prev_cr = safe_get_year_value(cr_series, prev_year)
+                cr_diff = latest_cr - prev_cr
                 cr_delta_str = f"{'+' if cr_diff >= 0 else ''}{cr_diff:.2f} delta"
                 cr_class = "up" if cr_diff >= 0 else "down"
 
@@ -1037,7 +1100,7 @@ def main():
                 st.markdown('<div style="text-align: center; font-weight: 600; margin-bottom: 0.5rem; color: #bbcabf;">Liquidity & Profitability Gauges</div>', unsafe_allow_html=True)
                 
                 # Fetch margins
-                net_margin = get_metric_values(df_ratios, "Net Margin %").loc[latest_year]
+                net_margin = safe_get_year_value(get_metric_values(df_ratios, "Net Margin %"), latest_year)
                 
                 col_g1, col_g2 = st.columns(2)
                 with col_g1:
@@ -1181,12 +1244,14 @@ def main():
                 st.plotly_chart(fig_cd, use_container_width=True)
             with cash_debt_cols[1]:
                 st.markdown("<br/>", unsafe_allow_html=True)
+                latest_cash_val = cash_vals.iloc[-1] if len(cash_vals) > 0 else 0.0
+                latest_debt_val = total_debt.iloc[-1] if len(total_debt) > 0 else 0.0
                 st.markdown(f"""
                     <div class="kpi-card" style="margin-top: 1rem;">
                         <div style="font-weight: 700; color: #38bdf8; margin-bottom: 0.5rem;">⚖️ Capital Structure Notes</div>
                         <span style="font-size: 0.9rem; color: #dde5dd;">
                             Monitoring the cash reserves against short and long-term liabilities is crucial for solvency analysis. 
-                            The business currently holds <b>{format_large_number(cash_vals.iloc[-1])}</b> in cash compared to a total debt burden of <b>{format_large_number(total_debt.iloc[-1])}</b>.
+                            The business currently holds <b>{format_large_number(latest_cash_val)}</b> in cash compared to a total debt burden of <b>{format_large_number(latest_debt_val)}</b>.
                         </span>
                     </div>
                 """, unsafe_allow_html=True)
@@ -1230,15 +1295,15 @@ def main():
             
             gauge_cols = st.columns(3)
             with gauge_cols[0]:
-                cr_val = get_metric_values(df_ratios, "Current Ratio").loc[ratio_year]
+                cr_val = safe_get_year_value(get_metric_values(df_ratios, "Current Ratio"), ratio_year)
                 fig_cr = create_ratio_gauge(f"Current Ratio ({ratio_year})", cr_val, 0.0, 10.0, "green_high")
                 st.plotly_chart(fig_cr, use_container_width=True)
             with gauge_cols[1]:
-                de_val = get_metric_values(df_ratios, "Debt to Equity Ratio").loc[ratio_year]
+                de_val = safe_get_year_value(get_metric_values(df_ratios, "Debt to Equity Ratio"), ratio_year)
                 fig_de = create_ratio_gauge(f"Debt to Equity ({ratio_year})", de_val, 0.0, 3.0, "red_high")
                 st.plotly_chart(fig_de, use_container_width=True)
             with gauge_cols[2]:
-                roe_val = get_metric_values(df_ratios, "Return on Equity (ROE) %").loc[ratio_year]
+                roe_val = safe_get_year_value(get_metric_values(df_ratios, "Return on Equity (ROE) %"), ratio_year)
                 fig_roe = create_ratio_gauge(f"ROE % ({ratio_year})", roe_val, 0.0, 100.0, "green_high")
                 st.plotly_chart(fig_roe, use_container_width=True)
 

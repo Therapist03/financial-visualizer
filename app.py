@@ -373,8 +373,15 @@ def parse_single_sheet(df_raw):
             df = df.applymap(clean_val)
 
         df.index = [str(idx).strip() for idx in df.index]
-        df = df[df.index != ""]
         df.columns = [str(col).strip() for col in df.columns]
+        
+        # Remove empty, nan or null indices and columns
+        df = df.loc[~df.index.isin(["", "nan", "NaN", "None"])]
+        df = df.loc[:, ~df.columns.isin(["", "nan", "NaN", "None"])]
+        
+        # Deduplicate index and columns to prevent reindex ValueErrors
+        df = df.loc[~df.index.duplicated(keep='first')]
+        df = df.loc[:, ~df.columns.duplicated(keep='first')]
         
         # Sort columns chronologically
         def get_sort_val(col):
@@ -454,14 +461,18 @@ def calculate_growth_rates(df):
     """
     Calculates year-over-year (YoY) growth percentages for each metric using vectorized math.
     """
-    growth_df = pd.DataFrame(index=df.index, columns=df.columns)
+    # Safeguard duplicates before calculating growth rates
+    df_clean = df.loc[~df.index.duplicated(keep='first')]
+    df_clean = df_clean.loc[:, ~df_clean.columns.duplicated(keep='first')]
+    
+    growth_df = pd.DataFrame(index=df_clean.index, columns=df_clean.columns)
     growth_df.iloc[:, 0] = 0.0
-    for i in range(1, len(df.columns)):
-        prev_col = df.columns[i - 1]
-        curr_col = df.columns[i]
+    for i in range(1, len(df_clean.columns)):
+        prev_col = df_clean.columns[i - 1]
+        curr_col = df_clean.columns[i]
         
-        p = df[prev_col]
-        c = df[curr_col]
+        p = df_clean[prev_col]
+        c = df_clean[curr_col]
         
         growth = np.where(
             p == 0,
@@ -476,14 +487,18 @@ def calculate_common_size(df, base_metric):
     Normalizes all financial metrics as a percentage of a baseline metric (e.g. Revenue)
     using vectorized pandas division.
     """
-    if base_metric not in df.index:
-        return df
+    # Safeguard duplicates
+    df_clean = df.loc[~df.index.duplicated(keep='first')]
+    df_clean = df_clean.loc[:, ~df_clean.columns.duplicated(keep='first')]
     
-    base_row = df.loc[base_metric]
+    if base_metric not in df_clean.index:
+        return df_clean
+    
+    base_row = df_clean.loc[base_metric]
     if isinstance(base_row, pd.DataFrame):
         base_row = base_row.iloc[0]
         
-    common_size_df = df.div(base_row, axis=1) * 100.0
+    common_size_df = df_clean.div(base_row, axis=1) * 100.0
     common_size_df = common_size_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
     
     return common_size_df
@@ -979,6 +994,19 @@ def main():
     df_balance = statements.get("Balance Sheet")
     df_ratios = statements.get("Financial Ratios")
     
+    # Clean duplicates and remove empty labels from df indices/columns immediately
+    for key, df in [("Income Statement", df_income), ("Balance Sheet", df_balance), ("Financial Ratios", df_ratios)]:
+        if df is not None and not df.empty:
+            df = df.loc[~df.index.duplicated(keep='first')]
+            df = df.loc[:, ~df.columns.duplicated(keep='first')]
+            df = df.loc[~df.index.isin(["", "nan", "NaN", "None"])]
+            df = df.loc[:, ~df.columns.isin(["", "nan", "NaN", "None"])]
+            statements[key] = df
+
+    df_income = statements.get("Income Statement")
+    df_balance = statements.get("Balance Sheet")
+    df_ratios = statements.get("Financial Ratios")
+
     # Global timeline (years) column synchronization:
     # Build the chronological union of all years appearing in any of the statement dataframes.
     all_cols = set()
@@ -998,7 +1026,7 @@ def main():
         except Exception:
             years = [str(y) for y in sorted(list(all_cols))]
 
-    # Align all dataframes to the identical years index
+    # Align all dataframes to the identical years index safely
     if years:
         if df_income is not None and not df_income.empty:
             df_income = df_income.reindex(columns=years, fill_value=0.0)

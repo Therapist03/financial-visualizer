@@ -215,7 +215,7 @@ def clean_and_parse_excel(uploaded_file):
         
         if is_transposed:
             # Format B: Rows as Periods, Columns as Metrics
-            headers = df_raw.iloc[0].tolist()
+            headers = list(df_raw.iloc[0])
             # Find period column name (e.g. Year, Date, Period)
             period_col_idx = 0
             for idx, h in enumerate(headers):
@@ -234,10 +234,10 @@ def clean_and_parse_excel(uploaded_file):
             df = df.T
         else:
             # Format A: Metrics as Rows, Periods as Columns
-            period_headers = df_raw.iloc[0, 1:].tolist()
+            period_headers = list(df_raw.iloc[0, 1:])
             period_headers = [str(p).strip() for p in period_headers]
             
-            metric_names = df_raw.iloc[1:, 0].tolist()
+            metric_names = list(df_raw.iloc[1:, 0])
             metric_names = [str(m).strip() for m in metric_names]
             
             data = df_raw.iloc[1:, 1:].copy()
@@ -483,8 +483,8 @@ def main():
     # Multi-select dropdown for Metrics filter
     selected_metrics = st.sidebar.multiselect(
         "Select Metrics to Display",
-        options=df.index.tolist(),
-        default=df.index.tolist()[:3] if len(df.index) > 3 else df.index.tolist(),
+        options=list(df.index),
+        default=list(df.index)[:3] if len(df.index) > 3 else list(df.index),
         help="Pick which lines/categories to project on the chart."
     )
 
@@ -652,13 +652,16 @@ def main():
 
 def create_plotly_chart(df_plot, chart_type, y_axis_label):
     fig = go.Figure()
-    periods = df_plot.columns.tolist()
+    periods = list(df_plot.columns)
     
     # Color palette coordinating with Stitch's Emerald theme
     colors = ['#0fb981', '#38bdf8', '#fb7185', '#9ed2b5', '#fbbf24', '#a78bfa', '#6366f1', '#ec4899']
     
     for idx, metric in enumerate(df_plot.index):
-        values = df_plot.loc[metric].tolist()
+        row_data = df_plot.loc[metric]
+        if isinstance(row_data, pd.DataFrame):
+            row_data = row_data.iloc[0]
+        values = list(row_data)
         color = colors[idx % len(colors)]
         
         if chart_type == 'Line':

@@ -701,8 +701,8 @@ def create_plotly_chart(df_plot, chart_type, y_axis_label):
         
     fig.update_layout(
         template='plotly_dark',
-        paper_bgcolor='rgba(26, 33, 29, 0.8)',
-        plot_bgcolor='rgba(26, 33, 29, 0.8)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
         font=dict(family='Inter, sans-serif', color='#dde5dd'),
         xaxis=dict(
             title='Time Period',
@@ -731,8 +731,7 @@ def create_plotly_chart(df_plot, chart_type, y_axis_label):
         ),
         barmode=barmode,
         margin=dict(l=40, r=40, t=50, b=40),
-        hovermode='x unified',
-        plot_bgcolor_opacity=0 # sets backdrop transparent
+        hovermode='x unified'
     )
     return fig
 

@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import io
+import re
+import datetime
 
 # Set Streamlit Page Config
 st.set_page_config(
@@ -256,14 +258,6 @@ def safe_get_year_value(series, year):
             val = val.iloc[0]
         return float(val)
         
-    # Try string representation
-    year_str = str(year).strip()
-    if year_str in series.index:
-        val = series.loc[year_str]
-        if isinstance(val, pd.Series):
-            val = val.iloc[0]
-        return float(val)
-        
     # Try integer representation
     try:
         year_int = int(float(year))
@@ -275,11 +269,61 @@ def safe_get_year_value(series, year):
     except (ValueError, TypeError):
         pass
         
+    # Try string representation
+    year_str = str(year).strip()
+    if year_str in series.index:
+        val = series.loc[year_str]
+        if isinstance(val, pd.Series):
+            val = val.iloc[0]
+        return float(val)
+        
     # Fallback to the last available element
     val = series.iloc[-1]
     return float(val)
 
 # ----------------- MULTI-SHEET DATA PROCESSING ENGINE -----------------
+
+def extract_year_from_cell(val):
+    """
+    Attempts to extract an integer year from a cell value.
+    Handles:
+    - Int/Float: 2021, 2021.0
+    - String with prefix/suffix: "FY2021", "FY 2021", "2021A", "2021 (Actual)"
+    - Date/Datetime objects: extracts the year attribute.
+    Returns:
+        int year if found, else None
+    """
+    if pd.isna(val) or val is None:
+        return None
+        
+    # Check if date/datetime object
+    if isinstance(val, (datetime.datetime, datetime.date)):
+        return val.year
+        
+    s = str(val).strip()
+    if not s:
+        return None
+        
+    # If it is direct float representation like "2021.0"
+    try:
+        f = float(s)
+        if 1900 <= f <= 2100:
+            return int(f)
+    except ValueError:
+        pass
+        
+    # Match a 4-digit number between 1900 and 2100
+    match = re.search(r'\b(19\d{2}|20\d{2})\b', s)
+    if match:
+        return int(match.group(1))
+        
+    # Match short format: "FY21" or "FY 21" (two digits)
+    match_short = re.search(r'\bfy\s*(\d{2})\b', s, re.IGNORECASE)
+    if match_short:
+        val_2d = int(match_short.group(1))
+        return 2000 + val_2d
+        
+    return None
 
 def parse_single_sheet(df_raw):
     """
@@ -294,58 +338,100 @@ def parse_single_sheet(df_raw):
         if df_raw.empty:
             return None, "Sheet contains no data."
 
-        # Helper: check if a cell can represent a number
-        def is_numeric_value(val):
-            if pd.isna(val):
-                return False
-            try:
-                if isinstance(val, (int, float)):
-                    return True
-                s = str(val).replace('$', '').replace(',', '').replace('%', '').replace('(', '').replace(')', '').strip()
-                if s == '-' or s == '':
-                    return True
-                float(s)
-                return True
-            except ValueError:
-                return False
+        # Scan first 5 rows for horizontal years (Format A)
+        detected_row_idx = None
+        detected_years_in_row = []
+        max_scan_rows = min(5, len(df_raw))
+        
+        for r_idx in range(max_scan_rows):
+            row_vals = df_raw.iloc[r_idx]
+            years_found = []
+            for c_idx, val in enumerate(row_vals):
+                yr = extract_year_from_cell(val)
+                if yr is not None:
+                    years_found.append((c_idx, yr))
+            if len(years_found) >= 2:
+                detected_row_idx = r_idx
+                detected_years_in_row = years_found
+                break
 
-        # Determine layout structure: (Rows as Metrics vs Columns as Metrics)
-        row0 = df_raw.iloc[0]
-        col0 = df_raw.iloc[:, 0]
+        # Scan first 5 columns for vertical years (Format B)
+        detected_col_idx = None
+        detected_years_in_col = []
+        max_scan_cols = min(5, df_raw.shape[1])
         
-        row0_numeric_count = sum(1 for x in row0[1:] if is_numeric_value(x))
-        col0_numeric_count = sum(1 for x in col0[1:] if is_numeric_value(x))
-        
-        row0_numeric_ratio = row0_numeric_count / max(1, len(row0) - 1)
-        col0_numeric_ratio = col0_numeric_count / max(1, len(col0) - 1)
-        
-        is_transposed = col0_numeric_ratio > row0_numeric_ratio
-        
+        for c_idx in range(max_scan_cols):
+            col_vals = df_raw.iloc[:, c_idx]
+            years_found = []
+            for r_idx, val in enumerate(col_vals):
+                yr = extract_year_from_cell(val)
+                if yr is not None:
+                    years_found.append((r_idx, yr))
+            if len(years_found) >= 2:
+                detected_col_idx = c_idx
+                detected_years_in_col = years_found
+                break
+
+        # If no years detected anywhere, return debug header warning
+        if detected_row_idx is None and detected_col_idx is None:
+            sample_headers = []
+            for r in range(min(3, len(df_raw))):
+                row_str = ", ".join([str(x) for x in df_raw.iloc[r].dropna()[:8]])
+                sample_headers.append(f"Row {r}: [{row_str}]")
+            headers_debug_info = " | ".join(sample_headers)
+            return None, f"Year/timeline headers could not be detected. Read headers: {headers_debug_info}"
+
+        # Determine transposition
+        row_count = len(detected_years_in_row)
+        col_count = len(detected_years_in_col)
+        is_transposed = col_count > row_count
+
         if is_transposed:
-            # Format B: Rows as Periods, Columns as Metrics
-            headers = list(df_raw.iloc[0])
-            period_col_idx = 0
-            for idx, h in enumerate(headers):
-                if str(h).lower() in ['year', 'date', 'period', 'quarter', 'time']:
-                    period_col_idx = idx
+            # Format B: Years are in a column, Metrics are in a row
+            years_map = {r_idx: yr for r_idx, yr in detected_years_in_col}
+            year_rows = list(years_map.keys())
+            
+            # Find the header row (metric names) above the first year row
+            first_year_row = year_rows[0]
+            metric_row_idx = 0
+            for r in range(first_year_row):
+                if df_raw.iloc[r].dropna().astype(str).str.strip().any():
+                    metric_row_idx = r
                     break
-            df_raw.columns = headers
-            df = df_raw.iloc[1:].copy()
-            period_col_name = headers[period_col_idx]
-            df = df.set_index(period_col_name)
-            df = df.T
+                    
+            # Extract metric columns (exclude the year column)
+            metric_cols = [c for c in range(df_raw.shape[1]) if c != detected_col_idx]
+            metrics = df_raw.iloc[metric_row_idx, metric_cols].astype(str).str.strip().tolist()
+            
+            # Extract data
+            data_vals = df_raw.iloc[year_rows, metric_cols].copy()
+            data_vals.index = [years_map[r] for r in year_rows]
+            data_vals.columns = metrics
+            
+            # Transpose so metrics are rows, years are columns
+            df = data_vals.T
         else:
-            # Format A: Metrics as Rows, Periods as Columns
-            period_headers = list(df_raw.iloc[0, 1:])
-            period_headers = [str(p).strip() for p in period_headers]
+            # Format A: Years are in a row, Metrics are in a column
+            years_map = {c_idx: yr for c_idx, yr in detected_years_in_row}
+            year_cols = list(years_map.keys())
             
-            metric_names = list(df_raw.iloc[1:, 0])
-            metric_names = [str(m).strip() for m in metric_names]
+            # Find the metric names column (usually first column that isn't a year)
+            metric_col_idx = 0
+            for c in range(df_raw.shape[1]):
+                if c not in year_cols:
+                    if df_raw.iloc[detected_row_idx+1:, c].dropna().astype(str).str.strip().any():
+                        metric_col_idx = c
+                        break
+                        
+            # Extract metric names
+            metrics = df_raw.iloc[detected_row_idx+1:, metric_col_idx].astype(str).str.strip().tolist()
             
-            data = df_raw.iloc[1:, 1:].copy()
-            data.index = metric_names
-            data.columns = period_headers
-            df = data
+            # Extract data
+            data_vals = df_raw.iloc[detected_row_idx+1:, year_cols].copy()
+            data_vals.index = metrics
+            data_vals.columns = [years_map[c] for c in year_cols]
+            
+            df = data_vals
 
         # Values cleaning: strip symbols ($ , % ), handle parentheses negative numbers
         def clean_val(val):
@@ -372,25 +458,21 @@ def parse_single_sheet(df_raw):
         else:
             df = df.applymap(clean_val)
 
+        # Standardize axis headers
         df.index = [str(idx).strip() for idx in df.index]
-        df.columns = [str(col).strip() for col in df.columns]
+        # Columns must be clean integers as requested
+        df.columns = [int(col) for col in df.columns]
         
         # Remove empty, nan or null indices and columns
         df = df.loc[~df.index.isin(["", "nan", "NaN", "None"])]
-        df = df.loc[:, ~df.columns.isin(["", "nan", "NaN", "None"])]
         
         # Deduplicate index and columns to prevent reindex ValueErrors
         df = df.loc[~df.index.duplicated(keep='first')]
         df = df.loc[:, ~df.columns.duplicated(keep='first')]
         
         # Sort columns chronologically
-        def get_sort_val(col):
-            try:
-                return float(col)
-            except ValueError:
-                return col
         try:
-            sorted_cols = sorted(df.columns, key=get_sort_val)
+            sorted_cols = sorted(df.columns)
             df = df[sorted_cols]
         except Exception:
             pass
@@ -421,7 +503,7 @@ def clean_and_parse_excel_multi(uploaded_file):
         for sheet_name, df_raw in excel_sheets.items():
             df_parsed, err = parse_single_sheet(df_raw)
             if err:
-                errors.append(f"Sheet '{sheet_name}' parsing failed: {err}")
+                errors.append(f"Sheet '{sheet_name}': {err}")
                 continue
                 
             if match_sheet_name(sheet_name, income_keywords):
@@ -448,7 +530,8 @@ def clean_and_parse_excel_multi(uploaded_file):
                     parsed_statements["Financial Ratios"] = df_parsed
 
         if not parsed_statements:
-            return None, "Could not identify any valid financial statements or ratios in the uploaded workbook. Please check the sheet structures."
+            warning_msg = "; ".join(errors) if errors else "No sheets could be read."
+            return None, f"Could not map worksheets: {warning_msg}"
             
         warnings = "; ".join(errors) if errors else None
         return parsed_statements, warnings
@@ -877,6 +960,7 @@ def get_sample_excel_bytes():
 def load_default_statements():
     """
     Initializes default financial statement dict for initial load.
+    Columns are clean integer types.
     """
     income_data = {
         "Revenue": [1000000, 1500000, 2200000, 3100000, 4200000, 5500000],
@@ -891,7 +975,7 @@ def load_default_statements():
         "Tax Expense": [30000, 61000, 108000, 177000, 284000, 407000],
         "Net Income": [160000, 304000, 512000, 808000, 1256000, 1768000]
     }
-    df_income = pd.DataFrame(income_data, index=["2020", "2021", "2022", "2023", "2024", "2025"]).T
+    df_income = pd.DataFrame(income_data, index=[2020, 2021, 2022, 2023, 2024, 2025]).T
     
     balance_data = {
         "Cash & Cash Equivalents": [300000, 450000, 600000, 850000, 1200000, 1600000],
@@ -909,7 +993,7 @@ def load_default_statements():
         "Total Shareholder Equity": [520000, 930000, 1380000, 2000000, 2720000, 3620000],
         "Total Liabilities & Equity": [1050000, 1430000, 1860000, 2470000, 3190000, 4090000]
     }
-    df_balance = pd.DataFrame(balance_data, index=["2020", "2021", "2022", "2023", "2024", "2025"]).T
+    df_balance = pd.DataFrame(balance_data, index=[2020, 2021, 2022, 2023, 2024, 2025]).T
     
     ratios_data = {
         "Current Ratio": [4.23, 5.20, 5.89, 6.68, 7.37, 8.09],
@@ -921,7 +1005,7 @@ def load_default_statements():
         "Return on Assets (ROA) %": [15.2, 21.3, 27.5, 32.7, 39.4, 43.2],
         "Return on Equity (ROE) %": [30.8, 32.7, 37.1, 40.4, 46.2, 48.8]
     }
-    df_ratios = pd.DataFrame(ratios_data, index=["2020", "2021", "2022", "2023", "2024", "2025"]).T
+    df_ratios = pd.DataFrame(ratios_data, index=[2020, 2021, 2022, 2023, 2024, 2025]).T
     
     return {
         "Income Statement": df_income,
@@ -961,6 +1045,7 @@ def main():
     )
     
     statements = {}
+    parse_error = None
     if uploaded_file is not None:
         statements, parse_error = clean_and_parse_excel_multi(uploaded_file)
         if parse_error:
@@ -994,6 +1079,10 @@ def main():
     df_balance = statements.get("Balance Sheet")
     df_ratios = statements.get("Financial Ratios")
     
+    # If parsing warnings are present, display a helpful warning message on screen
+    if parse_error:
+        st.warning(f"⚠️ **Year/Timeline Detection Warning**: {parse_error}")
+        
     # Clean duplicates and remove empty labels from df indices/columns immediately
     for key, df in [("Income Statement", df_income), ("Balance Sheet", df_balance), ("Financial Ratios", df_ratios)]:
         if df is not None and not df.empty:
@@ -1016,15 +1105,10 @@ def main():
             
     years = []
     if all_cols:
-        def get_sort_val(col):
-            try:
-                return float(col)
-            except ValueError:
-                return col
         try:
-            years = [str(y) for y in sorted(list(all_cols), key=get_sort_val)]
+            years = sorted([int(float(y)) for y in all_cols])
         except Exception:
-            years = [str(y) for y in sorted(list(all_cols))]
+            years = sorted(list(all_cols))
 
     # Align all dataframes to the identical years index safely
     if years:

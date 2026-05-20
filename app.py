@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 import io
 
@@ -315,18 +316,23 @@ def calculate_growth_rates(df):
 
 def calculate_common_size(df, base_metric):
     """
-    Normalizes all financial metrics as a percentage of a baseline metric (e.g. Revenue).
+    Normalizes all financial metrics as a percentage of a baseline metric (e.g. Revenue)
+    using vectorized pandas division.
     """
     if base_metric not in df.index:
         return df
+    
+    # Extract baseline row, taking the first instance in case of duplicate indices
     base_row = df.loc[base_metric]
-    common_size_df = pd.DataFrame(index=df.index, columns=df.columns)
-    for col in df.columns:
-        denominator = base_row[col]
-        if denominator == 0:
-            common_size_df[col] = 0.0
-        else:
-            common_size_df[col] = (df[col] / denominator) * 100.0
+    if isinstance(base_row, pd.DataFrame):
+        base_row = base_row.iloc[0]
+        
+    # Perform vectorized division along columns axis (axis=1) and scale by 100
+    common_size_df = df.div(base_row, axis=1) * 100.0
+    
+    # Replace infinite values (from division by zero) and fill NaNs gracefully
+    common_size_df = common_size_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    
     return common_size_df
 
 # ----------------- SAMPLE DATA GENERATION -----------------
